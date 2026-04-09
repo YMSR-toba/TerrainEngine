@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Terrain Engine</title>
+    <style>
+        body { background: #1a1a1a; color: #e0e0e0; font-family: 'Courier New', monospace; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        #controls { background: #2a2a2a; padding: 15px; border-radius: 5px; margin-bottom: 10px; width: 620px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        #container { position: relative; border: 2px solid #444; line-height: 0; }
+        canvas { image-rendering: pixelated; cursor: crosshair; }
+        #info-panel { width: 620px; background: #2a2a2a; padding: 15px; margin-top: 10px; border-radius: 5px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        .stat { color: #00ffcc; font-weight: bold; }
+        input[type="number"] { background: #333; color: #fff; border: 1px solid #555; padding: 5px; width: 80px; }
+        button { background: #006655; color: white; border: none; padding: 8px 12px; cursor: pointer; font-family: inherit; border-radius: 3px; font-size: 0.8em; }
+        button:hover { background: #008877; }
+        textarea { width: 95%; height: 60px; background: #111; color: #fff; border: 1px solid #444; padding: 10px; font-family: inherit; resize: none; }
+        .info-row { font-size: 0.85em; margin-top: 5px; border-top: 1px solid #444; padding-top: 5px; }
+        .village-info { color: #ff66aa; }
+        .base-info { color: #ffff00; }
+        .animal-info { color: #00ffcc; }
+        .file-btn { background: #444; }
+    </style>
+</head>
+<body>
+
+<h2>Terrain Engine</h2>
+
+<div id="controls">
+    <span>Seed:</span>
+    <input type="number" id="seedInput" value="12345">
+    <button onclick="generateMap()">再生成</button>
+    <button onclick="randomGenerate()">ランダム</button>
+    <button class="file-btn" onclick="exportWorld()">保存(JSON)</button>
+    <input type="file" id="importFile" style="display:none" onchange="importWorld(event)">
+    <button class="file-btn" onclick="document.getElementById('importFile').click()">読込</button>
+    <button style="background:#884400" onclick="toggleBuildMode()" id="buildBtn">建築モード: OFF</button>
+</div>
+
+<div id="container">
+    <canvas id="mapCanvas" width="520" height="520"></canvas>
+</div>
+
+<div id="info-panel">
+    <div>
+        座標: <span id="pos" class="stat">-</span> | バイオーム: <span id="biome" class="stat">-</span>
+        <br>高度: <span id="height" class="stat">-</span> | 湿度: <span id="hum" class="stat">-</span>
+    </div>
+    <div style="margin-top:10px;">
+        <textarea id="memoInput" placeholder="メモを入力..." oninput="saveMemo()"></textarea>
+    </div>
+    <div class="info-row village-info" id="villageList">主要集落: なし</div>
+    <div class="info-row base-info" id="baseList">設置拠点: なし</div>
+    <div class="info-row animal-info" id="animalList"></div>
+</div>
+
+<script>
+const SIZE = 65; 
+const TILE_SIZE = 8;
+const canvas = document.getElementById('mapCanvas');
+const ctx = canvas.getContext('2d');
+
+let heightMap, humidityMap, riverMap, villages = [];
+let animals = [];
+let bases = [];
+let buildMode = false;
+let worldData = { seed: 12345, memos: {}, bases: [], animals: [] };
+let selectedPos = { x: 0, y: 0 };
+
+const ANIMAL_TYPES = {
+    COW: { name: "牛", color: "#8b4513", spawn: (h, hum) => h > 0.45 && h < 0.65 && hum > 0.4 },
+    SHEEP: { name: "羊", color: "#ffffff", spawn: (h, hum) => h > 0.45 && h < 0.75 && hum < 0.6 },
+    PIG: { name: "豚", color: "#ffc0cb", spawn: (h, hum) => h > 0.45 && h < 0.6 && hum > 0.5 },
+    CHICKEN: { name: "鶏", color: "#ffffcc", spawn: (h, hum) => h > 0.45 && h < 0.7 },
+    WOLF: { name: "狼", color: "#a9a9a9", spawn: (h, hum) => h > 0.5 && hum > 0.3 && hum < 0.8 },
+    FISH: { name: "魚", color: "#add8e6", spawn: (h, hum) => h < 0.4 }
+};
+
+function seededRandom(seed) {
+    let x = Math.sin(seed) * 10000;
+    return x - Math.floor(x);
+}
+
+function diamondSquare(size, roughness, seed) {
+    let map = Array.from({ length: size }, () => new Float32Array(size));
+    let s = seed;
+    const getRand = () => { s += 0.123; return seededRandom(s); };
+    map[0][0] = getRand(); map[0][size-1] = getRand(); map[size-1][0] = getRand(); map[size-1][size-1] = getRand();
+    for (let side = size - 1; side >= 2; side /= 2) {
+        let half = side / 2, scale = roughness * side;
+        for (let y = half; y < size; y += side) {
+            for (let x = half; x < size; x += side) {
+                let avg = (map[y-half][x-half] + map[y-half][x+half] + map[y+half][x-half] + map[y+half][x+half]) / 4;
+                map[y][x] = avg + (getRand() * 2 - 1) * scale;
+            }
+        }
+        for (let y = 0; y < size; y += half) {
+            for (let x = (y + half) % side; x < size; x += side) {
+                let avg = 0, count = 0;
+                if (y >= half) { avg += map[y-half][x]; count++; }
+                if (y + half < size) { avg += map[y+half][x]; count++; }
+                if (x >= half) { avg += map[y][x-half]; count++; }
+                if (x + half < size) { avg += map[y][x+half]; count++; }
+                map[y][x] = (avg / count) + (getRand() * 2 - 1) * scale;
+            }
+        }
+    }
+    return map;
+}
+
+function generateRiverAndVillages(hMap, seed) {
+    let rMap = Array.from({ length: SIZE }, () => new Int8Array(SIZE).fill(0));
+    let vList = [], s = seed;
+    let startX = Math.floor(seededRandom(s++) * 30) + 17, startY = Math.floor(seededRandom(s++) * 30) + 17;
+    let current = {x: startX, y: startY}, visited = new Set();
+    for (let i = 0; i < 500; i++) {
+        rMap[current.y][current.x] = 1;
+        visited.add(`${current.x},${current.y}`);
+        if (hMap[current.y][current.x] < 0.3) break;
+        let neighbors = [];
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                let nx = current.x + dx, ny = current.y + dy;
+                if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE) {
+                    let score = hMap[ny][nx] * 5 + (Math.min(nx, ny, SIZE-1-nx, SIZE-1-ny) / SIZE);
+                    if (visited.has(`${nx},${ny}`)) score += 20;
+                    neighbors.push({x: nx, y: ny, score: score});
+                }
+            }
+        }
+        neighbors.sort((a, b) => a.score - b.score);
+        let next = neighbors[0];
+        if (hMap[next.y][next.x] >= hMap[current.y][current.x]) hMap[next.y][next.x] = hMap[current.y][current.x] - 0.005;
+        current = next;
+    }
+    for (let attempt = 0; attempt < 100; attempt++) {
+        let vx = Math.floor(seededRandom(s++) * SIZE), vy = Math.floor(seededRandom(s++) * SIZE);
+        let h = hMap[vy][vx], dist = Math.sqrt((vx-startX)**2 + (vy-startY)**2);
+        if (h > 0.46 && h < 0.65 && dist < 20 && dist > 3) { vList.push({x: vx, y: vy}); if (vList.length >= 3) break; }
+    }
+    return {rMap, vList};
+}
+
+function spawnAnimals(seed) {
+    let list = [], s = seed;
+    for(let i=0; i<120; i++) {
+        let x = Math.floor(seededRandom(s++) * SIZE), y = Math.floor(seededRandom(s++) * SIZE);
+        let h = heightMap[y][x], hum = humidityMap[y][x];
+        for(let key in ANIMAL_TYPES) {
+            if(ANIMAL_TYPES[key].spawn(h, hum) && seededRandom(s++) > 0.85) {
+                list.push({type: key, x: x, y: y, tamed: false, id: Date.now() + i});
+                break;
+            }
+        }
+    }
+    return list;
+}
+
+function getBiome(h, hum) {
+    if (h < 0.3) return { name: "深海", color: "#000044" };
+    if (h < 0.4) return { name: "浅瀬", color: "#0044bb" };
+    if (h < 0.45) return { name: "砂浜", color: "#d2b48c" };
+    if (h > 0.8) return { name: "高山", color: "#ffffff" };
+    if (hum > 0.6 && h > 0.45 && h < 0.7) return { name: "森林", color: "#004400" }; 
+    if (hum > 0.7) return { name: "湿地", color: "#1a3300" };
+    if (hum < 0.3) return { name: "荒野", color: "#8b4513" };
+    return { name: "平原", color: "#228b22" };
+}
+
+function generateMap(newSeed = null, isImport = false) {
+    if (newSeed !== null) document.getElementById('seedInput').value = newSeed;
+    const seed = parseInt(document.getElementById('seedInput').value);
+    
+    worldData.seed = seed;
+    heightMap = diamondSquare(SIZE, 0.02, seed);
+    humidityMap = diamondSquare(SIZE, 0.03, seed + 500);
+    let result = generateRiverAndVillages(heightMap, seed + 1000);
+    riverMap = result.rMap; 
+    villages = result.vList;
+
+    if (!isImport) {
+        animals = spawnAnimals(seed + 2000);
+        bases = [];
+        worldData.memos = {};
+    }
+
+    updateUI();
+    draw();
+}
+
+function randomGenerate() { generateMap(Math.floor(Math.random() * 100000)); }
+
+function toggleBuildMode() {
+    buildMode = !buildMode;
+    document.getElementById('buildBtn').innerText = "建築モード: " + (buildMode ? "ON" : "OFF");
+    document.getElementById('buildBtn').style.background = buildMode ? "#ff4400" : "#884400";
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let y = 0; y < SIZE; y++) {
+        for (let x = 0; x < SIZE; x++) {
+            let b = getBiome(heightMap[y][x], humidityMap[y][x]);
+            ctx.fillStyle = b.color;
+            ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            if (riverMap[y][x]) { ctx.fillStyle = "#00ffff"; ctx.fillRect(x * TILE_SIZE + 2, y * TILE_SIZE + 2, 4, 4); }
+            if (worldData.memos[`${x},${y}`]) { ctx.fillStyle = "rgba(255, 255, 255, 0.3)"; ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, 2, 2); }
+        }
+    }
+    animals.forEach(a => {
+        ctx.fillStyle = a.tamed ? "#ff00ff" : ANIMAL_TYPES[a.type].color;
+        ctx.fillRect(a.x * TILE_SIZE + 2, a.y * TILE_SIZE + 2, 4, 4);
+    });
+    villages.forEach(v => {
+        ctx.fillStyle = "#ff0077"; ctx.beginPath(); ctx.arc(v.x * TILE_SIZE + 4, v.y * TILE_SIZE + 4, 3, 0, Math.PI*2); ctx.fill();
+    });
+    bases.forEach(b => {
+        ctx.font = "10px serif";
+        ctx.fillText("🏠", b.x * TILE_SIZE - 2, b.y * TILE_SIZE + 8);
+    });
+    ctx.strokeStyle = "#ffff00"; ctx.lineWidth = 2;
+    ctx.strokeRect(selectedPos.x * TILE_SIZE, selectedPos.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+}
+
+setInterval(() => {
+    animals.forEach(a => {
+        if (Math.random() > 0.8) {
+            let dx = Math.floor(Math.random() * 3) - 1, dy = Math.floor(Math.random() * 3) - 1;
+            let nx = a.x + dx, ny = a.y + dy;
+            if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE) {
+                if ((a.type === 'FISH' && heightMap[ny][nx] < 0.4) || (a.type !== 'FISH' && heightMap[ny][nx] >= 0.4)) {
+                    a.x = nx; a.y = ny;
+                }
+            }
+        }
+    });
+    draw();
+}, 1000);
+
+canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    let x = Math.floor((e.clientX - rect.left) / TILE_SIZE);
+    let y = Math.floor((e.clientY - rect.top) / TILE_SIZE);
+    selectedPos = {x, y};
+
+    if (buildMode) {
+        if (!bases.some(b => b.x === x && b.y === y)) bases.push({x, y});
+        else bases = bases.filter(b => !(b.x === x && b.y === y));
+    } else {
+        let animal = animals.find(a => a.x === x && a.y === y);
+        if (animal) animal.tamed = !animal.tamed;
+    }
+    updateUI();
+    draw();
+});
+
+function updateUI() {
+    const {x, y} = selectedPos;
+    const b = getBiome(heightMap[y][x], humidityMap[y][x]);
+    let isV = villages.some(v => v.x === x && v.y === y);
+    let isB = bases.some(bp => bp.x === x && bp.y === y);
+    let ani = animals.find(a => a.x === x && a.y === y);
+
+    document.getElementById('pos').innerText = `X:${x}, Y:${y}`;
+    document.getElementById('biome').innerText = (isV ? "★集落 " : "") + (isB ? "🏠拠点 " : "") + b.name;
+    document.getElementById('height').innerText = heightMap[y][x].toFixed(3);
+    document.getElementById('hum').innerText = humidityMap[y][x].toFixed(3);
+    document.getElementById('memoInput').value = worldData.memos[`${x},${y}`] || "";
+    
+    document.getElementById('villageList').innerText = "主要集落: " + (villages.length ? villages.map(v => `[${v.x},${v.y}]`).join(", ") : "なし");
+    document.getElementById('baseList').innerText = "設置拠点: " + (bases.length ? bases.map(b => `[${b.x},${b.y}]`).join(", ") : "なし");
+    document.getElementById('animalList').innerText = ani ? `生物検知: ${ANIMAL_TYPES[ani.type].name}${ani.tamed ? ' (飼いならし済)' : ''}` : "";
+}
+
+function saveMemo() {
+    worldData.memos[`${selectedPos.x},${selectedPos.y}`] = document.getElementById('memoInput').value;
+}
+
+function exportWorld() {
+    worldData.animals = animals; worldData.bases = bases;
+    const blob = new Blob([JSON.stringify(worldData)], {type: "application/json"});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = `world_${worldData.seed}.json`; a.click();
+}
+
+function importWorld(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const data = JSON.parse(e.target.result);
+        worldData = data;
+        // 重要: 内部変数をインポートデータで上書き
+        animals = data.animals || [];
+        bases = data.bases || [];
+        generateMap(data.seed, true);
+    };
+    reader.readAsText(file);
+}
+
+generateMap();
+</script>
+</body>
+</html>
