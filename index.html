@@ -16,10 +16,11 @@
         button { background: #006655; color: white; border: none; padding: 8px 12px; cursor: pointer; font-family: inherit; border-radius: 3px; font-size: 0.8em; }
         button:hover { background: #008877; }
         textarea { width: 95%; height: 60px; background: #111; color: #fff; border: 1px solid #444; padding: 10px; font-family: inherit; resize: none; }
-        .info-row { font-size: 0.85em; margin-top: 5px; border-top: 1px solid #444; padding-top: 5px; }
+        .info-row { font-size: 0.85em; margin-top: 5px; border-top: 1px solid #444; padding-top: 5px; white-space: pre-wrap; word-wrap: break-word; }
         .village-info { color: #ff66aa; }
         .base-info { color: #ffff00; }
         .animal-info { color: #00ffcc; }
+        .tamed-info { color: #ff00ff; border-color: #ff00ff; } /* 飼いならしリスト用 */
         .file-btn { background: #444; }
     </style>
 </head>
@@ -52,31 +53,102 @@
     </div>
     <div class="info-row village-info" id="villageList">主要集落: なし</div>
     <div class="info-row base-info" id="baseList">設置拠点: なし</div>
-    <div class="info-row animal-info" id="animalList"></div>
-</div>
+    <div class="info-row tamed-info" id="tamedAnimalList">飼いならした生物: なし</div> <div class="info-row animal-info" id="animalDetailList"></div> </div>
 
 <script>
+// --- コア定数・変数（変更なし） ---
 const SIZE = 65; 
 const TILE_SIZE = 8;
 const canvas = document.getElementById('mapCanvas');
 const ctx = canvas.getContext('2d');
 
 let heightMap, humidityMap, riverMap, villages = [];
-let animals = [];
+let animals = []; // 中身の構造は変わる
 let bases = [];
 let buildMode = false;
 let worldData = { seed: 12345, memos: {}, bases: [], animals: [] };
 let selectedPos = { x: 0, y: 0 };
 
-const ANIMAL_TYPES = {
-    COW: { name: "牛", color: "#8b4513", spawn: (h, hum) => h > 0.45 && h < 0.65 && hum > 0.4 },
-    SHEEP: { name: "羊", color: "#ffffff", spawn: (h, hum) => h > 0.45 && h < 0.75 && hum < 0.6 },
-    PIG: { name: "豚", color: "#ffc0cb", spawn: (h, hum) => h > 0.45 && h < 0.6 && hum > 0.5 },
-    CHICKEN: { name: "鶏", color: "#ffffcc", spawn: (h, hum) => h > 0.45 && h < 0.7 },
-    WOLF: { name: "狼", color: "#a9a9a9", spawn: (h, hum) => h > 0.5 && hum > 0.3 && hum < 0.8 },
-    FISH: { name: "魚", color: "#add8e6", spawn: (h, hum) => h < 0.4 }
+// ==========================================================
+// --- [統合] ERD (Emotion Reproduction Device) ロジック ---
+// ==========================================================
+const ERD = {
+    emotionData: [
+        "憂鬱", "疲れ", "リラックス", "惨め", "混乱", "嬉しい",
+        "緊張", "覚醒", "感動", "悲しい", "眠たい", "落ち着き",
+        "イライラ", "平穏", "満足", "怒り", "興奮", "歓喜",
+        "うんざり", "無関心", "安心", "不快", "達観", "楽しい",
+        "警戒", "驚き", "感謝"
+    ],
+
+    // 量子化関数
+    clampIndex: (val) => {
+        if (val <= -0.33) return 0; // Negative状態
+        if (val >= 0.33) return 2;  // Positive状態
+        return 1;                    // Neutral状態
+    },
+
+    // 脳波・心拍から感情インデックスを算出 (移植・簡略化)
+    analyzeEmotion: (brainInput, id) => {
+        // idをシードにして個体固有の重みを生成（C#版の重み更新の代わり）
+        const s = id;
+        const getW = (offset) => seededRandom(s + offset) * 3 - 1;
+
+        // 中間層 (Alpha, Beta, HR入力)
+        let i0 = (brainInput.a * getW(0)) + (brainInput.b * getW(1)) + (brainInput.hr * getW(2));
+        let i1 = (brainInput.a * getW(3)) + (brainInput.b * getW(4)) + (brainInput.hr * getW(5));
+        let i2 = (brainInput.a * getW(6)) + (brainInput.b * getW(7)) + (brainInput.hr * getW(8));
+        let i3 = (brainInput.a * getW(9)) + (brainInput.b * getW(10)) + (brainInput.hr * getW(11));
+
+        // 出力層
+        let o0 = (i0 * getW(12)) + (i1 * getW(13)) + (i2 * getW(14)) + (i3 * getW(15)); // Axis 1
+        let o1 = (i0 * getW(16)) + (i1 * getW(17)) + (i2 * getW(18)) + (i3 * getW(19)); // Axis 2
+        let o2 = (i0 * getW(20)) + (i1 * getW(21)) + (i2 * getW(22)) + (i3 * getW(23)); // Axis 3
+
+        // 量子化して3進数ロジックでインデックス化
+        let idx0 = ERD.clampIndex(o0);
+        let idx1 = ERD.clampIndex(o1);
+        let idx2 = ERD.clampIndex(o2);
+
+        let finalIdx = idx0 + (idx1 * 3) + (idx2 * 9);
+        return finalIdx; // 0-26
+    },
+
+    // 感情インデックスに基づいて行動（移動ベクトル）を決定
+    // 平穏(13)を基準に、興奮(16)等は動き、落ち着き(11)等は止まる
+    getMovementVector: (emotionIdx) => {
+        const emoStr = ERD.emotionData[emotionIdx];
+        // 簡易的な行動テーブル
+        const activeEmotions = ["興奮", "歓喜", "イライラ", "怒り", "警戒", "驚き", "楽しい"];
+        const calmEmotions = ["リラックス", "落ち着き", "安心", "平穏", "眠たい", "達観", "無関心"];
+
+        if (activeEmotions.includes(emoStr)) {
+            // 活発：全方向に移動の可能性
+            return { dx: Math.floor(Math.random() * 3) - 1, dy: Math.floor(Math.random() * 3) - 1 };
+        } else if (calmEmotions.includes(emoStr)) {
+            // 冷静：ほぼ動かない
+            return { dx: 0, dy: 0 };
+        }
+        // 通常：たまに動く
+        return Math.random() > 0.5 ? 
+            { dx: Math.floor(Math.random() * 3) - 1, dy: Math.floor(Math.random() * 3) - 1 } : 
+            { dx: 0, dy: 0 };
+    }
 };
 
+// ==========================================================
+// --- [変更] 動物定義 (繁殖・性別・ERDパラメータ追加) ---
+// ==========================================================
+const ANIMAL_TYPES = {
+    COW: { name: "牛", color: "#2a2a2a", maxAge: 100, breedAge: 10, spawn: (h, hum) => h > 0.45 && h < 0.65 && hum > 0.4 },
+    SHEEP: { name: "羊", color: "#ffffff", maxAge: 75, breedAge: 7, spawn: (h, hum) => h > 0.45 && h < 0.75 && hum < 0.6 },
+    PIG: { name: "豚", color: "#ffc0cb", maxAge: 75, breedAge: 6, spawn: (h, hum) => h > 0.45 && h < 0.6 && hum > 0.5 },
+    CHICKEN: { name: "鶏", color: "#ffffcc", maxAge: 40, breedAge: 4, spawn: (h, hum) => h > 0.45 && h < 0.7 },
+    WOLF: { name: "狼", color: "#a9a9a9", maxAge: 120, breedAge: 12, spawn: (h, hum) => h > 0.5 && hum > 0.3 && hum < 0.8 },
+    FISH: { name: "魚", color: "#add8e6", maxAge: 30, breedAge: 1, spawn: (h, hum) => h < 0.4 }
+};
+
+// --- コア関数（Diamond-Square, Riverなどは変更なし） ---
 function seededRandom(seed) {
     let x = Math.sin(seed) * 10000;
     return x - Math.floor(x);
@@ -143,21 +215,6 @@ function generateRiverAndVillages(hMap, seed) {
     return {rMap, vList};
 }
 
-function spawnAnimals(seed) {
-    let list = [], s = seed;
-    for(let i=0; i<120; i++) {
-        let x = Math.floor(seededRandom(s++) * SIZE), y = Math.floor(seededRandom(s++) * SIZE);
-        let h = heightMap[y][x], hum = humidityMap[y][x];
-        for(let key in ANIMAL_TYPES) {
-            if(ANIMAL_TYPES[key].spawn(h, hum) && seededRandom(s++) > 0.85) {
-                list.push({type: key, x: x, y: y, tamed: false, id: Date.now() + i});
-                break;
-            }
-        }
-    }
-    return list;
-}
-
 function getBiome(h, hum) {
     if (h < 0.3) return { name: "深海", color: "#000044" };
     if (h < 0.4) return { name: "浅瀬", color: "#0044bb" };
@@ -169,13 +226,57 @@ function getBiome(h, hum) {
     return { name: "平原", color: "#228b22" };
 }
 
+// ==========================================================
+// --- [変更] 動物初期スポーン (新規パラメータ対応) ---
+// ==========================================================
+function spawnAnimals(seed) {
+    let list = [], s = seed;
+    for(let i=0; i<100; i++) { // 初期数を少し減らす（繁殖するため）
+        let x = Math.floor(seededRandom(s++) * SIZE), y = Math.floor(seededRandom(s++) * SIZE);
+        let h = heightMap[y][x], hum = humidityMap[y][x];
+        for(let key in ANIMAL_TYPES) {
+            if(ANIMAL_TYPES[key].spawn(h, hum) && seededRandom(s++) > 0.8) {
+                list.push(createAnimalObject(key, x, y, s));
+                break;
+            }
+        }
+    }
+    return list;
+}
+
+// 動物オブジェクト作成ヘルパー
+function createAnimalObject(type, x, y, s, parents = null) {
+    // 脳波入力の初期値をシードから生成 (0.0 - 1.0)
+    const brainInput = {
+        a: seededRandom(s + 10),
+        b: seededRandom(s + 20),
+        hr: seededRandom(s + 30) // 心拍数 40-180を0-1にリマップしたものと想定
+    };
+    const id = Date.now() + Math.floor(seededRandom(s) * 1000);
+    
+    return {
+        id: id,
+        type: type,
+        x: x, y: y,
+        tamed: false,
+        // --- 新規パラメータ ---
+        sex: seededRandom(s + 40) > 0.5 ? "M" : "F", // 性別
+        age: Math.floor(seededRandom(s + 50) * 15), // 0〜15歳の状態で生まれる
+        parents: parents, // 両親のID [M_id, F_id]
+        brainInput: brainInput, // ERDへの入力値
+        emotionIdx: ERD.analyzeEmotion(brainInput, id), // 現在の感情
+        breedCooldown: 0 // 繁殖クールダウン
+    };
+}
+
+// --- メインロジック（UI更新、描画、建築、I/Oは変更なし） ---
 function generateMap(newSeed = null, isImport = false) {
     if (newSeed !== null) document.getElementById('seedInput').value = newSeed;
     const seed = parseInt(document.getElementById('seedInput').value);
     
     worldData.seed = seed;
     heightMap = diamondSquare(SIZE, 0.02, seed);
-    humidityMap = diamondSquare(SIZE, 0.03, seed + 500);
+    humidityMap = diamondSquare(SIZE, roughness=0.03, seed + 500); // 湿度マップ
     let result = generateRiverAndVillages(heightMap, seed + 1000);
     riverMap = result.rMap; 
     villages = result.vList;
@@ -200,6 +301,7 @@ function toggleBuildMode() {
 
 function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // 地形・川描画
     for (let y = 0; y < SIZE; y++) {
         for (let x = 0; x < SIZE; x++) {
             let b = getBiome(heightMap[y][x], humidityMap[y][x]);
@@ -209,10 +311,20 @@ function draw() {
             if (worldData.memos[`${x},${y}`]) { ctx.fillStyle = "rgba(255, 255, 255, 0.3)"; ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, 2, 2); }
         }
     }
+    // 動物描画 (変更: 性別で少し形を変える)
     animals.forEach(a => {
-        ctx.fillStyle = a.tamed ? "#ff00ff" : ANIMAL_TYPES[a.type].color;
-        ctx.fillRect(a.x * TILE_SIZE + 2, a.y * TILE_SIZE + 2, 4, 4);
+        if (a.age < 5) ctx.fillStyle = "#ffff00"; // 子供は黄色
+        else ctx.fillStyle = a.tamed ? "#ff00ff" : ANIMAL_TYPES[a.type].color;
+        
+        if (a.sex === "M") {
+            // オスは四角
+            ctx.fillRect(a.x * TILE_SIZE + 2, a.y * TILE_SIZE + 2, 4, 4);
+        } else {
+            // メスは丸
+            ctx.beginPath(); ctx.arc(a.x * TILE_SIZE + 4, a.y * TILE_SIZE + 4, 2, 0, Math.PI*2); ctx.fill();
+        }
     });
+    // 集落・拠点描画
     villages.forEach(v => {
         ctx.fillStyle = "#ff0077"; ctx.beginPath(); ctx.arc(v.x * TILE_SIZE + 4, v.y * TILE_SIZE + 4, 3, 0, Math.PI*2); ctx.fill();
     });
@@ -220,25 +332,118 @@ function draw() {
         ctx.font = "10px serif";
         ctx.fillText("🏠", b.x * TILE_SIZE - 2, b.y * TILE_SIZE + 8);
     });
+    // 選択枠
     ctx.strokeStyle = "#ffff00"; ctx.lineWidth = 2;
     ctx.strokeRect(selectedPos.x * TILE_SIZE, selectedPos.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
 }
 
+// ==========================================================
+// --- [大幅変更] 生態系アップデート (ERD移動、加齢、繁殖、死亡) ---
+// ==========================================================
 setInterval(() => {
-    animals.forEach(a => {
-        if (Math.random() > 0.8) {
-            let dx = Math.floor(Math.random() * 3) - 1, dy = Math.floor(Math.random() * 3) - 1;
+    if (!heightMap) return;
+
+    let newBabies = [];
+    let deadIds = new Set();
+    const currentSeed = parseInt(document.getElementById('seedInput').value);
+    
+    // 全体の個体数チェック
+    const isPopLow = animals.length < 20; 
+
+    // 種ごとの個体数をカウント（絶滅防止用）
+    const counts = {};
+    animals.forEach(a => counts[a.type] = (counts[a.type] || 0) + 1);
+
+    animals.forEach((a) => {
+        const def = ANIMAL_TYPES[a.type];
+        a.age++;
+        let agingSpeed = 1;
+        if (animals.length > 50) agingSpeed = 2; // 50匹を超えたら加齢（衰弱）が2倍
+        if (animals.length > 100) agingSpeed = 5; // 100匹を超えたら一気に寿命が来る
+        a.age += agingSpeed;
+
+        // 死亡判定
+        if (a.age > def.maxAge || (a.type !== 'FISH' && heightMap[a.y][a.x] < 0.4)) {
+            deadIds.add(a.id);
+            return;
+        }
+
+        // ERDによる感情更新
+        a.brainInput.a = Math.max(0, Math.min(1, a.brainInput.a + (Math.random() * 0.1 - 0.05)));
+        a.emotionIdx = ERD.analyzeEmotion(a.brainInput, a.id);
+
+        // --- 移動ロジックの強化 ---
+        let dx = 0, dy = 0;
+        
+        // 繁殖可能なメスなら、近くのオスを探してそちらへ向かう
+        if (a.sex === "F" && a.breedCooldown === 0 && a.age >= def.breedAge) {
+            const nearestMale = animals.find(p => 
+                p.type === a.type && p.sex === "M" && p.age >= def.breedAge &&
+                Math.abs(p.x - a.x) < 5 && Math.abs(p.y - a.y) < 5
+            );
+            if (nearestMale) {
+                dx = Math.sign(nearestMale.x - a.x);
+                dy = Math.sign(nearestMale.y - a.y);
+            }
+        }
+
+        // 近場にオスがいない、またはオス自身はERDに基づく移動
+        if (dx === 0 && dy === 0) {
+            const vec = ERD.getMovementVector(a.emotionIdx);
+            dx = vec.dx; dy = vec.dy;
+        }
+
+        // 移動実行（飼いならし中は少し制限）
+        if (!a.tamed || Math.random() > 0.8) {
             let nx = a.x + dx, ny = a.y + dy;
             if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE) {
-                if ((a.type === 'FISH' && heightMap[ny][nx] < 0.4) || (a.type !== 'FISH' && heightMap[ny][nx] >= 0.4)) {
+                const isWater = heightMap[ny][nx] < 0.4;
+                if ((a.type === 'FISH' && isWater) || (a.type !== 'FISH' && !isWater)) {
                     a.x = nx; a.y = ny;
                 }
             }
         }
-    });
-    draw();
-}, 1000);
 
+        // --- 繁殖ロジック（隣接チェック） ---
+        if (a.breedCooldown > 0) a.breedCooldown--;
+        if (a.sex === "F" && a.age >= def.breedAge && a.breedCooldown === 0) {
+            const partner = animals.find(p => 
+                p.type === a.type && p.sex === "M" && p.age >= def.breedAge && 
+                Math.abs(p.x - a.x) <= 1 && Math.abs(p.y - a.y) <= 1
+            );
+
+            if (partner) {
+                const breedSeed = currentSeed + a.id + partner.id;
+                // 確実に増えるように確率を底上げ (> 0.05 = 95%成功)
+                if (seededRandom(breedSeed) > 0.05) { 
+                    newBabies.push(createAnimalObject(a.type, a.x, a.y, breedSeed, [partner.id, a.id]));
+                    a.breedCooldown = 25;
+                    partner.breedCooldown = 20;
+                }
+            }
+        }
+    });
+
+    // 死亡と誕生を反映
+    animals = animals.filter(a => !deadIds.has(a.id)).concat(newBabies);
+
+    // --- 【絶滅防止】神の御手システム ---
+    Object.keys(ANIMAL_TYPES).forEach(type => {
+        if ((counts[type] || 0) < 1 || animals.length < 5 || type !== 'WOLF') {
+            const rx = Math.floor(Math.random() * SIZE), ry = Math.floor(Math.random() * SIZE);
+            if (heightMap[ry][rx] > 0.45) {
+                animals.push(createAnimalObject(type, rx, ry, Math.random()));
+                animals.push(createAnimalObject(type, rx, ry, Math.random())); // ペアで補充
+            }else{
+                animals.push(createAnimalObject("FISH", rx, ry, Math.random()));
+                animals.push(createAnimalObject("FISH", rx, ry, Math.random()));
+            }
+        }
+    });
+
+}, 500); // 0.5秒ごとにシミュレーション
+
+// --- インタラクション（クリック処理は変更なし） ---
 canvas.addEventListener('click', (e) => {
     const rect = canvas.getBoundingClientRect();
     let x = Math.floor((e.clientX - rect.left) / TILE_SIZE);
@@ -249,37 +454,78 @@ canvas.addEventListener('click', (e) => {
         if (!bases.some(b => b.x === x && b.y === y)) bases.push({x, y});
         else bases = bases.filter(b => !(b.x === x && b.y === y));
     } else {
+        // クリックした位置にいる動物を探す
         let animal = animals.find(a => a.x === x && a.y === y);
-        if (animal) animal.tamed = !animal.tamed;
+        if (animal) {
+            // [維持] 飼いならしトグル
+            animal.tamed = !animal.tamed;
+            // 飼いならされたら脳波入力（感情）を安定させる
+            if (animal.tamed) {
+                animal.brainInput = { a: 0.9, b: 0.1, hr: 0.4 }; // リラックス・平穏寄り
+            }
+        }
     }
     updateUI();
-    draw();
 });
 
+// ==========================================================
+// --- [変更] UI更新 (飼いならしリスト、生物詳細情報) ---
+// ==========================================================
 function updateUI() {
     const {x, y} = selectedPos;
+    if (y === undefined) return;
+
     const b = getBiome(heightMap[y][x], humidityMap[y][x]);
     let isV = villages.some(v => v.x === x && v.y === y);
     let isB = bases.some(bp => bp.x === x && bp.y === y);
-    let ani = animals.find(a => a.x === x && a.y === y);
 
+    // 1. 基本情報
     document.getElementById('pos').innerText = `X:${x}, Y:${y}`;
     document.getElementById('biome').innerText = (isV ? "★集落 " : "") + (isB ? "🏠拠点 " : "") + b.name;
     document.getElementById('height').innerText = heightMap[y][x].toFixed(3);
     document.getElementById('hum').innerText = humidityMap[y][x].toFixed(3);
     document.getElementById('memoInput').value = worldData.memos[`${x},${y}`] || "";
     
+    // 2. 各種リスト
     document.getElementById('villageList').innerText = "主要集落: " + (villages.length ? villages.map(v => `[${v.x},${v.y}]`).join(", ") : "なし");
     document.getElementById('baseList').innerText = "設置拠点: " + (bases.length ? bases.map(b => `[${b.x},${b.y}]`).join(", ") : "なし");
-    document.getElementById('animalList').innerText = ani ? `生物検知: ${ANIMAL_TYPES[ani.type].name}${ani.tamed ? ' (飼いならし済)' : ''}` : "";
+
+    // 3. [新規] 飼いならした生物リストの表示
+    const tamedList = animals.filter(a => a.tamed);
+    if (tamedList.length > 0) {
+        const listStr = tamedList.map(a => `${ANIMAL_TYPES[a.type].name}(${a.sex === "M"?'♂':'♀'},X:${a.x},Y:${a.y})`).join(", ");
+        document.getElementById('tamedAnimalList').innerText = "飼いならした生物: " + listStr;
+    } else {
+        document.getElementById('tamedAnimalList').innerText = "飼いならした生物: なし";
+    }
+
+    // 4. [変更] 選択タイルの生物詳細検知
+    let ani = animals.find(a => a.x === x && a.y === y);
+    if (ani) {
+        const def = ANIMAL_TYPES[ani.type];
+        const emoName = ERD.emotionData[ani.emotionIdx];
+        let detail = `【生物検知】\n`;
+        detail += `種別: ${def.name} (${ani.sex === "M" ? "オス" : "メス"})\n`;
+        detail += `状態: ${ani.age < 5 ? "子供" : "大人"} (Age: ${ani.age}/${def.maxAge})\n`;
+        detail += `感情: ${emoName} (a:${ani.brainInput.a.toFixed(2)}, b:${ani.brainInput.b.toFixed(2)}, hr:${ani.brainInput.hr.toFixed(2)})\n`;
+        if (ani.tamed) detail += `★飼いならし済\n`;
+        if (ani.parents) detail += `両親ID: ${ani.parents[0]}, ${ani.parents[1]}`;
+        
+        document.getElementById('animalDetailList').innerText = detail;
+    } else {
+        document.getElementById('animalDetailList').innerText = "";
+    }
 }
 
+// --- メモ、I/O（変更なし） ---
 function saveMemo() {
     worldData.memos[`${selectedPos.x},${selectedPos.y}`] = document.getElementById('memoInput').value;
 }
 
 function exportWorld() {
-    worldData.animals = animals; worldData.bases = bases;
+    // セーブデータ構造は維持するが、animalsの中身は拡張されている
+    worldData.animals = animals; 
+    worldData.bases = bases;
     const blob = new Blob([JSON.stringify(worldData)], {type: "application/json"});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = `world_${worldData.seed}.json`; a.click();
@@ -290,17 +536,40 @@ function importWorld(event) {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (e) => {
-        const data = JSON.parse(e.target.result);
-        worldData = data;
-        // 重要: 内部変数をインポートデータで上書き
-        animals = data.animals || [];
-        bases = data.bases || [];
-        generateMap(data.seed, true);
+        try {
+            const data = JSON.parse(e.target.result);
+            worldData = data;
+            // 内部変数をインポートデータで上書き
+            // 古いセーブデータの場合は繁殖用パラメータがないが、
+            // 読み込み後のsetInterval処理で補完される（感情などは初期化される）
+            animals = data.animals || [];
+            bases = data.bases || [];
+            
+            // 古いデータ形式の互換性補完
+            animals.forEach(a => {
+                if (!a.id) a.id = Date.now() + Math.random() * 1000;
+                if (!a.age) a.age = 10; // 大人として扱う
+                if (!a.sex) a.sex = Math.random() > 0.5 ? "M" : "F";
+                if (!a.brainInput) a.brainInput = { a: 0.5, b: 0.5, hr: 0.5 };
+                if (a.emotionIdx === undefined) a.emotionIdx = 13; // 平穏
+            });
+
+            generateMap(data.seed, true);
+        } catch(err) {
+            alert("ロードに失敗しました。データが不正です。");
+        }
     };
     reader.readAsText(file);
 }
 
+// 初期起動
 generateMap();
+
+function animationLoop() {
+    draw();
+    requestAnimationFrame(animationLoop);
+}
+animationLoop(); // 描画専用のループを回す
 </script>
 </body>
 </html>
