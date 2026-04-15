@@ -309,6 +309,20 @@ function draw() {
         else { ctx.beginPath(); ctx.arc(a.x*TILE_SIZE+4, a.y*TILE_SIZE+4, 2, 0, 7); ctx.fill(); }
     });
     villages.forEach(v => { ctx.fillStyle = "#ff0077"; ctx.beginPath(); ctx.arc(v.x*TILE_SIZE+4, v.y*TILE_SIZE+4, 4, 0, 7); ctx.fill(); });
+    if (player) {
+        ctx.fillStyle = player.color;
+        ctx.shadowBlur = 10; ctx.shadowColor = "#00ff00";
+        ctx.fillRect(player.x * TILE_SIZE, player.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = "white"; ctx.font = "10px Arial";
+        ctx.fillText(player.name, player.x * TILE_SIZE - 5, player.y * TILE_SIZE - 5);
+    }
+    // リモートプレイヤーの描画
+    Object.values(remotePlayers).forEach(p => {
+        ctx.fillStyle = "#ff00ff";
+        ctx.fillRect(p.x * TILE_SIZE, p.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+        ctx.fillText(p.name, p.x * TILE_SIZE - 5, p.y * TILE_SIZE - 5);
+    });
     ctx.strokeStyle = "#ffff00"; ctx.strokeRect(selectedPos.x*TILE_SIZE, selectedPos.y*TILE_SIZE, TILE_SIZE, TILE_SIZE);
 }
 
@@ -387,6 +401,157 @@ function updateUI() {
     if(ani) {
         aArea.innerHTML = `【生物】${tierData.animals[ani.type]} (${ani.sex}) 感情:${ERD.emotionData[ani.emotionIdx]} ${ani.tamed?"[飼養中]":""} <button onclick='downloadEntityJSON(animals.find(a=>a.x===${x}&&a.y===${y}), "Animal")'>JSON出力</button>`;
     } else aArea.innerText = "";
+}
+
+// --- プレイヤー管理セクション ---
+let player = null; // ローカルプレイヤー
+let remotePlayers = {}; // 他プレイヤー用（WebRTC）
+
+// キャラJSON読み込みボタンの作成（controlsの中に追加）
+const spawnBtn = document.createElement('button');
+spawnBtn.innerText = "キャラ読込・スポーン";
+spawnBtn.style.background = "#0055aa";
+spawnBtn.onclick = () => document.getElementById('playerInput').click();
+document.getElementById('controls').appendChild(spawnBtn);
+
+const pInput = document.createElement('input');
+pInput.type = 'file';
+pInput.id = 'playerInput';
+pInput.style.display = 'none';
+pInput.onchange = importPlayerJSON;
+document.body.appendChild(pInput);
+
+function importPlayerJSON(e) {
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        const data = JSON.parse(event.target.result);
+        player = {
+            id: "local-" + Date.now(),
+            name: data.name,
+            x: 32, y: 32, // 初期位置
+            stats: data.base_stats,
+            color: "#00ff00"
+        };
+        console.log("Player Spawned:", player.name);
+    };
+    reader.readAsText(e.target.files[0]);
+}
+
+// window全体で入力を監視
+window.addEventListener('keydown', (e) => {
+    // プレイヤーがいない、または入力欄にフォーカスがある時は処理しない
+    if (!player || ["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) {
+        return;
+    }
+
+    const key = e.key.toLowerCase();
+    let nx = player.x;
+    let ny = player.y;
+
+    // WASD移動
+    if (key === 'w') { ny--; e.preventDefault(); }
+    if (key === 's') { ny++; e.preventDefault(); }
+    if (key === 'a') { nx--; e.preventDefault(); }
+    if (key === 'd') { nx++; e.preventDefault(); }
+
+    // 地形判定
+    if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE) {
+        if (heightMap[ny][nx] >= 0.0) {
+            player.x = nx;
+            player.y = ny;
+            broadcastPosition();
+        }
+    }
+}, { passive: false }); // preventDefaultを有効にするためのオプション
+
+// --- WebRTC マルチプレイセクション (複数人対応・安定版) ---
+let peerConnections = {}; 
+let dataChannels = {};    
+let currentPeerId = "peer_" + Math.floor(Math.random() * 1000); // 接続用の一時ID
+
+// UIを更新
+const rtcControls = document.getElementById('rtc-wrapper') || document.createElement('div');
+rtcControls.id = 'rtc-wrapper';
+rtcControls.innerHTML = `
+    <div style="margin-top:10px; border-top:1px solid #444; padding-top:10px;">
+        <div style="font-size:0.8em; color:#aaa; margin-bottom:5px;">Connection ID: <input type="text" id="targetPeerId" value="Player2" style="width:80px; background:#000; color:#fff; border:1px solid #444;"></div>
+        <button onclick="startConnection(true)">HostとしてOffer生成</button>
+        <button onclick="startConnection(false)">GuestとしてAnswer生成</button><br>
+        <textarea id="rtcText" placeholder="SDPをここに貼り付け"></textarea><br>
+        <button id="rtcAction">シグナリング確定</button>
+    </div>
+`;
+if(!document.getElementById('rtc-wrapper')) document.getElementById('info-panel').appendChild(rtcControls);
+
+async function startConnection(isHost) {
+    const peerId = document.getElementById('targetPeerId').value;
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    
+    // インスタンスを保存
+    peerConnections[peerId] = pc;
+
+    // ICE Candidateの監視
+    pc.onicecandidate = (e) => {
+        if (!e.candidate) {
+            console.log("SDP生成完了");
+            document.getElementById('rtcText').value = JSON.stringify(pc.localDescription);
+        }
+    };
+
+    if (isHost) {
+        // Host側: データチャネルを作成
+        const dc = pc.createDataChannel("gameData");
+        dataChannels[peerId] = dc;
+        setupDataChannel(dc, peerId);
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        document.getElementById('rtcText').value = JSON.stringify(pc.localDescription);
+
+        document.getElementById('rtcAction').onclick = async () => {
+            const answer = new RTCSessionDescription(JSON.parse(document.getElementById('rtcText').value));
+            await pc.setRemoteDescription(answer);
+        };
+    } else {
+        // Guest側: チャネルを受け取る準備
+        pc.ondatachannel = (e) => {
+            dataChannels[peerId] = e.channel;
+            setupDataChannel(e.channel, peerId);
+        };
+
+        document.getElementById('rtcAction').onclick = async () => {
+            const offerStr = document.getElementById('rtcText').value;
+            const offer = new RTCSessionDescription(JSON.parse(offerStr));
+            await pc.setRemoteDescription(offer);
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            document.getElementById('rtcText').value = JSON.stringify(pc.localDescription);
+        };
+    }
+}
+
+function setupDataChannel(dc, id) {
+    dc.onopen = () => console.log(`Connected with: ${id}`);
+    dc.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "pos") {
+            remotePlayers[msg.id] = { x: msg.x, y: msg.y, name: msg.name };
+        }
+    };
+}
+
+// 送信処理を全チャンネル対応に変更
+function broadcastPosition() {
+    if (!player) return;
+    const data = JSON.stringify({
+        type: "pos", id: player.id, x: player.x, y: player.y, name: player.name
+    });
+
+    for (let id in dataChannels) {
+        if (dataChannels[id].readyState === "open") {
+            dataChannels[id].send(data);
+        }
+    }
 }
 
 function saveMemo() { /* そのまま */ }
