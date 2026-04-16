@@ -25,6 +25,7 @@
         .v-toggle { background: #555; width: 90px; }
         .v-active { background: #aa0044; }
     </style>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 </head>
 <body>
 
@@ -369,15 +370,37 @@ canvas.addEventListener('click', (e) => {
     const x = Math.floor((e.clientX - r.left) / TILE_SIZE);
     const y = Math.floor((e.clientY - r.top) / TILE_SIZE);
     selectedPos = { x, y };
+
     if (buildMode) {
-        const idx = bases.findIndex(b => b.x===x && b.y===y);
-        if (idx===-1) bases.push({x,y}); else bases.splice(idx,1);
+        const idx = bases.findIndex(b => b.x === x && b.y === y);
+        if (idx === -1) {
+            bases.push({ x, y });
+        } else {
+            bases.splice(idx, 1);
+        }
+        // 建築データを同期
+        syncBuildData();
     } else {
-        let a = animals.find(ani => ani.x===x && ani.y===y);
+        let a = animals.find(ani => ani.x === x && ani.y === y);
         if (a) a.tamed = !a.tamed;
     }
     updateUI();
 });
+
+// 建築データを全プレイヤーに送信する関数
+function syncBuildData() {
+    const data = { type: "build_sync", data: bases };
+    
+    // ホストなら全員に、ゲストならホストに送る
+    if (isHost()) {
+        relayToAll(data, null); 
+    } else {
+        // ホスト（最初の接続先）を探して送る
+        for (let id in connections) {
+            connections[id].send(data);
+        }
+    }
+}
 
 function updateUI() {
     const {x,y} = selectedPos;
@@ -464,95 +487,141 @@ window.addEventListener('keydown', (e) => {
     }
 }, { passive: false }); // preventDefaultを有効にするためのオプション
 
-// --- WebRTC マルチプレイセクション (複数人対応・安定版) ---
-let peerConnections = {}; 
-let dataChannels = {};    
-let currentPeerId = "peer_" + Math.floor(Math.random() * 1000); // 接続用の一時ID
+// --- PeerJS Listen Server システム ---
+let peer = null;
+let connections = {}; // 接続中の全コネクション
 
 // UIを更新
 const rtcControls = document.getElementById('rtc-wrapper') || document.createElement('div');
 rtcControls.id = 'rtc-wrapper';
 rtcControls.innerHTML = `
     <div style="margin-top:10px; border-top:1px solid #444; padding-top:10px;">
-        <div style="font-size:0.8em; color:#aaa; margin-bottom:5px;">Connection ID: <input type="text" id="targetPeerId" value="Player2" style="width:80px; background:#000; color:#fff; border:1px solid #444;"></div>
-        <button onclick="startConnection(true)">HostとしてOffer生成</button>
-        <button onclick="startConnection(false)">GuestとしてAnswer生成</button><br>
-        <textarea id="rtcText" placeholder="SDPをここに貼り付け"></textarea><br>
-        <button id="rtcAction">シグナリング確定</button>
+        <div style="font-size:0.8em; color:#aaa; margin-bottom:5px;">
+            Your/Target Room ID: 
+            <input type="text" id="targetPeerId" style="width:120px; background:#000; color:#00ffcc; border:1px solid #444; padding:2px 5px;">
+        </div>
+        <button onclick="startConnection()" style="background:#006655;">このIDに接続 (Guest)</button>
+        <div style="font-size:0.7em; color:#888; margin-top:5px;">
+            ※Hostは表示されているIDを相手に伝えてください。
+        </div>
     </div>
 `;
 if(!document.getElementById('rtc-wrapper')) document.getElementById('info-panel').appendChild(rtcControls);
 
-async function startConnection(isHost) {
-    const peerId = document.getElementById('targetPeerId').value;
-    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-    
-    // インスタンスを保存
-    peerConnections[peerId] = pc;
+// 初期化：ページ読み込み時にPeerオブジェクトを作成
+function initPeer() {
+    // IDをランダム生成（または固定文字列も可能）
+    const myId = 'room-' + Math.floor(Math.random() * 9000 + 1000);
+    peer = new Peer(myId);
 
-    // ICE Candidateの監視
-    pc.onicecandidate = (e) => {
-        if (!e.candidate) {
-            console.log("SDP生成完了");
-            document.getElementById('rtcText').value = JSON.stringify(pc.localDescription);
-        }
-    };
-
-    if (isHost) {
-        // Host側: データチャネルを作成
-        const dc = pc.createDataChannel("gameData");
-        dataChannels[peerId] = dc;
-        setupDataChannel(dc, peerId);
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        document.getElementById('rtcText').value = JSON.stringify(pc.localDescription);
-
-        document.getElementById('rtcAction').onclick = async () => {
-            const answer = new RTCSessionDescription(JSON.parse(document.getElementById('rtcText').value));
-            await pc.setRemoteDescription(answer);
-        };
-    } else {
-        // Guest側: チャネルを受け取る準備
-        pc.ondatachannel = (e) => {
-            dataChannels[peerId] = e.channel;
-            setupDataChannel(e.channel, peerId);
-        };
-
-        document.getElementById('rtcAction').onclick = async () => {
-            const offerStr = document.getElementById('rtcText').value;
-            const offer = new RTCSessionDescription(JSON.parse(offerStr));
-            await pc.setRemoteDescription(offer);
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            document.getElementById('rtcText').value = JSON.stringify(pc.localDescription);
-        };
-    }
-}
-
-function setupDataChannel(dc, id) {
-    dc.onopen = () => console.log(`Connected with: ${id}`);
-    dc.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === "pos") {
-            remotePlayers[msg.id] = { x: msg.x, y: msg.y, name: msg.name };
-        }
-    };
-}
-
-// 送信処理を全チャンネル対応に変更
-function broadcastPosition() {
-    if (!player) return;
-    const data = JSON.stringify({
-        type: "pos", id: player.id, x: player.x, y: player.y, name: player.name
+    peer.on('open', (id) => {
+        console.log('My peer ID is: ' + id);
+        document.getElementById('targetPeerId').value = id; // 自分のIDを表示
     });
 
-    for (let id in dataChannels) {
-        if (dataChannels[id].readyState === "open") {
-            dataChannels[id].send(data);
+    // 【Host側】Guestからの接続を待ち受け
+    peer.on('connection', (conn) => {
+        setupDataChannel(conn);
+    });
+
+    peer.on('error', (err) => {
+        console.error('PeerJS Error:', err);
+        alert('通信エラーが発生しました: ' + err.type);
+    });
+}
+
+// 【Guest側】Hostに接続を開始する
+async function startConnection() {
+    const targetId = document.getElementById('targetPeerId').value;
+    if (!targetId) return alert("接続先IDを入力してください");
+
+    const conn = peer.connect(targetId);
+    setupDataChannel(conn);
+}
+
+// --- 多人数対応リレーシステム ---
+function setupDataChannel(conn) {
+    conn.on('open', () => {
+        console.log('Connected with: ' + conn.peer);
+        connections[conn.peer] = conn;
+        
+        // 新しく入ってきた人に、現在の全プレイヤー情報を同期させるための合図
+        if (player) broadcastPosition();
+    });
+
+    conn.on('data', (data) => {
+        const msg = typeof data === 'string' ? JSON.parse(data) : data;
+        
+        // --- 位置同期とタイムスタンプ更新 ---
+        if (msg.type === "pos") {
+            remotePlayers[msg.id] = { 
+                x: msg.x, 
+                y: msg.y, 
+                name: msg.name,
+                lastUpdate: Date.now() // 受信時刻を記録
+            };
+            if (isHost()) relayToAll(msg, conn.peer);
+        }
+
+        // --- 建築同期 ---
+        if (msg.type === "build_sync") {
+            bases = msg.data; // 建築リストを上書き同期
+            if (isHost()) relayToAll(msg, conn.peer); // 他のゲストにも転送
+        }
+    });
+
+    conn.on('close', () => {
+        delete connections[conn.peer];
+        // 誰かが離脱したことを他全員に知らせる処理（任意）
+    });
+}
+
+// ホスト判定（最初にIDを発行した側かどうか）
+function isHost() {
+    // 自分のPeer IDがtargetPeerIdに入力されているものと同じならホストとみなす簡易判定
+    const myId = peer ? peer.id : "";
+    const displayedId = document.getElementById('targetPeerId').value;
+    return myId === displayedId;
+}
+
+// 自分と、送信元（senderPeerId）以外の全員にデータを転送
+function relayToAll(msg, senderPeerId) {
+    for (let id in connections) {
+        if (id !== senderPeerId && connections[id].open) {
+            connections[id].send(msg);
         }
     }
 }
+
+// 送信処理の修正（connectionsオブジェクトをループ）
+function broadcastPosition() {
+    if (!player) return;
+    const data = {
+        type: "pos", id: player.id, x: player.x, y: player.y, name: player.name
+    };
+
+    for (let id in connections) {
+        if (connections[id].open) {
+            connections[id].send(data);
+        }
+    }
+}
+
+// ページロード時に初期化を実行
+initPeer();
+
+// ゴーストプレイヤーの掃除（1秒ごとにチェック）
+setInterval(() => {
+    const now = Date.now();
+    const timeout = 5000; // 5秒更新がなければ削除
+
+    for (let id in remotePlayers) {
+        if (now - remotePlayers[id].lastUpdate > timeout) {
+            console.log(`Player timeout: ${remotePlayers[id].name}`);
+            delete remotePlayers[id];
+        }
+    }
+}, 1000);
 
 function saveMemo() { /* そのまま */ }
 function exportWorld() { /* そのまま */ }
