@@ -272,26 +272,45 @@ function getBiome(h, hum) {
 
 // --- JSON出力 ---
 function downloadEntityJSON(data, type) {
-    const tier = getTier();
-    const animalNameMap = MULTIVERSE_DATA[tier].animals;
-    const stats = { spade: Math.floor(data.brainInput.a*10)+1, diamond: Math.floor(data.brainInput.b*10)+1, club: Math.floor(data.brainInput.hr*10)+1, heart: (data.id%10)+1 };
-    const base = JSON.parse(JSON.stringify(player.originalData || {}));
-    base.terrain_engine = {
-        survival:{
-            hp: player.hp,
-            stamina: player.stamina,
-            food: player.food,
-            position: { x: player.x, y: player.y },
-            inventory: player.inventory,
-            tamed_wolves: player.tamedWolves.map(w => ({
-                id: w.id,
-                type: w.type,
-                stats: w.stats
-            }))
+
+    let sheet;
+
+    const desc = `村人 / 職業:${data.role}`;
+
+    const stats = {
+        spade: Math.floor(data.brainInput.a * 10) + 1,
+        diamond: Math.floor(data.brainInput.b * 10) + 1,
+        club: Math.floor(data.brainInput.hr * 10) + 1,
+        heart: (data.id % 10) + 1
+    };
+
+    sheet = {
+        name: data.name,
+        description: desc,
+        origin_system: "Terrain Engine",
+        base_stats: stats,
+        systems_config: {
+            "Terrain Engine":{
+                stat_names:{
+                    spade:"STR",
+                    diamond:"PER",
+                    club:"DEX",
+                    heart:"CHA",
+                },
+                equipment:{},
+                storage:{
+                    backpack:[],
+                    warehouse:[]
+                }
+            }
         }
-    }
+    };
+
     const blob = new Blob([JSON.stringify(sheet, null, 2)], {type: "application/json"});
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${type}_${sheet.name}.json`; a.click();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${type}_${sheet.name}.json`;
+    a.click();
 }
 
 // --- 生成コア ---
@@ -516,7 +535,7 @@ function updateUI() {
     let ani = animals.find(a => a.x===x && a.y===y);
     const aArea = document.getElementById('animalArea');
     if(ani) {
-        aArea.innerHTML = `【生物】${tierData.animals[ani.type]} (${ani.sex}) 感情:${ERD.emotionData[ani.emotionIdx]} ${ani.tamed?"[飼養中]":""} <button onclick='downloadEntityJSON(animals.find(a=>a.x===${x}&&a.y===${y}), "Animal")'>JSON出力</button>`;
+        aArea.innerHTML = `【生物】${tierData.animals[ani.type]} (${ani.sex}) 感情:${ERD.emotionData[ani.emotionIdx]} ${ani.tamed?"[飼養中]":""}`;
     } else aArea.innerText = "";
     if (player) {
         document.getElementById('animalArea').innerText += `
@@ -928,10 +947,25 @@ function exportWolf(index) {
         name: "Tamed_" + wolf.type + "_" + wolf.id,
         origin_system: "Terrain Engine",
         base_stats: wolf.stats || {
-            spade: 3,
-            diamond: 2,
-            club: 4,
-            heart: 2
+            spade: 7,
+            diamond: 8,
+            club: 10,
+            heart: 5
+        },
+        systems_config: {
+            "Terrain Engine":{
+                stat_names:{
+                    spade:"STR",
+                    diamond:"PER",
+                    club:"DEX",
+                    heart:"CHA",
+                },
+                equipment:{},
+                storage:{
+                    backpack:[],
+                    warehouse:[]
+                }
+            }
         },
         terrain_engine: {
             type: "tamed_animal"
