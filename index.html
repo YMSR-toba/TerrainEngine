@@ -439,15 +439,40 @@ canvas.addEventListener('click', (e) => {
     selectedPos = { x, y };
 
     if (buildMode) {
-        const idx = bases.findIndex(b => b.x === x && b.y === y);
-        if (idx === -1) {
-            bases.push({ x, y });
-        } else {
-            bases.splice(idx, 1);
+
+        if (!player) {
+            alert("プレイヤーがいません");
+            return;
         }
-        // 建築データを同期
+
+        // 木材チェック
+        if (!player.inventory || player.inventory.wood === undefined) {
+            player.inventory = player.inventory || {};
+            player.inventory.wood = 0;
+        }
+
+        const COST = 5; // 建築コスト
+
+        const idx = bases.findIndex(b => b.x === x && b.y === y);
+
+        if (idx === -1) {
+            // 建築（設置）
+            if (player.inventory.wood < COST) {
+                alert("木材が足りません");
+                return;
+            }
+
+            player.inventory.wood -= COST;
+            bases.push({ x, y });
+
+        } else {
+            // 撤去（返却ありにするなら）
+            bases.splice(idx, 1);
+            player.inventory.wood += Math.floor(COST / 2); // 半分返却
+        }
+
         syncBuildData();
-    } else {
+    }else {
         if (DEBUG_MODE) {
             let a = animals.find(ani => ani.x === x && ani.y === y);
             if (a) a.tamed = !a.tamed;
@@ -746,9 +771,9 @@ function handleGather(biome) {
 function handleTrade(village) {
     const result = trumpCheck(player.stats.diamond);
 
-    if (result === "success" && player.inventory.meat > 0) {
-        player.inventory.meat--;
-        player.inventory.wood += 2;
+    if (result === "success" && player.inventory.wood > 0) {
+        player.inventory.wood--;
+        player.inventory.meat += 2;
     }
 }
 
