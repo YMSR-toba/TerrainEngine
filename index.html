@@ -124,6 +124,25 @@ const ANIMAL_TYPES = {
 // --- ヘルパー ---
 function seededRandom(seed) { let x = Math.sin(seed) * 10000; return x - Math.floor(x); }
 
+function calculateHP(stats) {
+    return (stats.club * 10) + (stats.spade * 10);
+}
+
+function calculateStamina(stats) {
+    // 行動力：spade + heart
+    return (stats.spade * 15) + (stats.heart * 15);
+}
+
+function trumpCheck(stat) {
+    const roll = Math.floor(Math.random() * 14) + 1;
+
+    if (roll === 14) return "fumble";
+    if (roll <= stat) {
+        return Math.random() < 0.25 ? "critical" : "success";
+    }
+    return "fail";
+}
+
 function getTier() {
     const x = parseInt(document.getElementById('axisX').value);
     if (x <= 7) return "LOW";
@@ -224,7 +243,22 @@ function generateRoads(vList, hMap) {
 function createAnimalObject(type, x, y, s) {
     const id = Date.now() + Math.floor(seededRandom(s)*1000);
     const brainInput = { a: seededRandom(s+10), b: seededRandom(s+20), hr: seededRandom(s+30) };
-    return { id, type, x, y, tamed: false, sex: seededRandom(s+40)>0.5?"M":"F", age: Math.floor(seededRandom(s+50)*10), brainInput, emotionIdx: ERD.analyzeEmotion(brainInput, id), breedCooldown: 0 };
+    return {
+        id,
+        type,
+        x,
+        y,
+
+        state: "wild",
+
+        tamed: false,
+        sex: seededRandom(s+40)>0.5?"M":"F",
+        age: Math.floor(seededRandom(s+50)*10),
+
+        brainInput,
+        emotionIdx: ERD.analyzeEmotion(brainInput, id),
+        breedCooldown: 0
+    };
 }
 
 function getBiome(h, hum) {
@@ -241,13 +275,21 @@ function downloadEntityJSON(data, type) {
     const tier = getTier();
     const animalNameMap = MULTIVERSE_DATA[tier].animals;
     const stats = { spade: Math.floor(data.brainInput.a*10)+1, diamond: Math.floor(data.brainInput.b*10)+1, club: Math.floor(data.brainInput.hr*10)+1, heart: (data.id%10)+1 };
-    const sheet = {
-        name: data.name || `${animalNameMap[data.type]}_${data.id}`,
-        description: `${type}データ。座標(X:${document.getElementById('axisX').value},Y:${document.getElementById('axisY').value}) / 現実度:${tier}`,
-        origin_system: "Terrain Engine (Multiverse)",
-        base_stats: stats,
-        systems_config: { TRPG: { stat_names: { spade:"STR", diamond:"INT", club:"VIT", heart:"LUK" }, equipment: [] } }
-    };
+    const base = JSON.parse(JSON.stringify(player.originalData || {}));
+    base.terrain_engine = {
+        survival:{
+            hp: player.hp,
+            stamina: player.stamina,
+            food: player.food,
+            position: { x: player.x, y: player.y },
+            inventory: player.inventory,
+            tamed_wolves: player.tamedWolves.map(w => ({
+                id: w.id,
+                type: w.type,
+                stats: w.stats
+            }))
+        }
+    }
     const blob = new Blob([JSON.stringify(sheet, null, 2)], {type: "application/json"});
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${type}_${sheet.name}.json`; a.click();
 }
@@ -363,12 +405,37 @@ setInterval(() => {
             }
         }
     });
+    animals.forEach(a => a.processed = false);
+    // スタミナ回復
+    if (player.stamina < player.maxStamina) {
+        player.stamina += 1;
+    }
+    // HP回復（肉がある場合）
+    if (player.inventory.meat > 0 && player.inventory.food < 100 ) {
+        player.inventory.food += 2;
+        player.inventory.meat -= 1;
+
+        if (player.inventory.food > 100) player.inventory.food = 100;
+    }else if (player.inventory.food > 0 && player.hp < player.maxHP){
+        player.hp += 2;
+        player.inventory.food -= 1;
+
+        if (player.hp > player.maxHP) player.hp = player.maxHP;
+    }
+    if (player.hp <= 0) {
+        alert("あなたは死亡しました");
+        player = null;
+        return;
+    }
 }, 1500);
 
 canvas.addEventListener('click', (e) => {
     const r = canvas.getBoundingClientRect();
     const x = Math.floor((e.clientX - r.left) / TILE_SIZE);
     const y = Math.floor((e.clientY - r.top) / TILE_SIZE);
+
+    const DEBUG_MODE = false;
+
     selectedPos = { x, y };
 
     if (buildMode) {
@@ -381,8 +448,10 @@ canvas.addEventListener('click', (e) => {
         // 建築データを同期
         syncBuildData();
     } else {
-        let a = animals.find(ani => ani.x === x && ani.y === y);
-        if (a) a.tamed = !a.tamed;
+        if (DEBUG_MODE) {
+            let a = animals.find(ani => ani.x === x && ani.y === y);
+            if (a) a.tamed = !a.tamed;
+        }
     }
     updateUI();
 });
@@ -424,11 +493,53 @@ function updateUI() {
     if(ani) {
         aArea.innerHTML = `【生物】${tierData.animals[ani.type]} (${ani.sex}) 感情:${ERD.emotionData[ani.emotionIdx]} ${ani.tamed?"[飼養中]":""} <button onclick='downloadEntityJSON(animals.find(a=>a.x===${x}&&a.y===${y}), "Animal")'>JSON出力</button>`;
     } else aArea.innerText = "";
+    if (player) {
+        document.getElementById('animalArea').innerText += `
+    HP:${player.hp}/${player.maxHP}
+    ST:${player.stamina}/${player.maxStamina}
+    FOOD:${player.food}
+    WOOD:${player.inventory.wood}
+    MEAT:${player.inventory.meat}
+    WOLF:${player.tamedWolves.length}/2
+    `;
+    }
+    // 飼いならした狼表示
+    if (player && player.tamedWolves && player.tamedWolves.length > 0) {
+        let wolfHTML = "<div class='info-row'>【テイム済み】<br>";
+
+        player.tamedWolves.forEach((w, i) => {
+            wolfHTML += `
+            ${i+1}: ${w.type}
+            <button onclick='exportWolf(${i})'>JSON出力</button><br>
+            `;
+        });
+
+        wolfHTML += "</div>";
+
+        document.getElementById('animalArea').innerHTML += wolfHTML;
+    }
 }
 
 // --- プレイヤー管理セクション ---
 let player = null; // ローカルプレイヤー
 let remotePlayers = {}; // 他プレイヤー用（WebRTC）
+
+let turn = 0;
+let day = 1;
+
+function nextTurn() {
+    turn++;
+    player.stamina--;
+
+    if (turn % 5 === 0) player.food--;
+
+    if (player.food <= 0) player.hp--;
+
+    if (turn >= 120) {
+        turn = 0;
+        day++;
+    }
+}
 
 // キャラJSON読み込みボタンの作成（controlsの中に追加）
 const spawnBtn = document.createElement('button');
@@ -436,6 +547,12 @@ spawnBtn.innerText = "キャラ読込・スポーン";
 spawnBtn.style.background = "#0055aa";
 spawnBtn.onclick = () => document.getElementById('playerInput').click();
 document.getElementById('controls').appendChild(spawnBtn);
+const exportBtn = document.createElement('button');
+exportBtn.innerText = "キャラ保存(JSON)";
+exportBtn.style.background = "#884400";
+exportBtn.onclick = exportPlayerJSON;
+
+document.getElementById('controls').appendChild(exportBtn);
 
 const pInput = document.createElement('input');
 pInput.type = 'file';
@@ -444,24 +561,83 @@ pInput.style.display = 'none';
 pInput.onchange = importPlayerJSON;
 document.body.appendChild(pInput);
 
-function importPlayerJSON(e) {
-    const reader = new FileReader();
-    reader.onload = (event) => {
-        const data = JSON.parse(event.target.result);
-        player = {
-            id: "local-" + Date.now(),
-            name: data.name,
-            x: 32, y: 32, // 初期位置
-            stats: data.base_stats,
-            color: "#00ff00"
-        };
-        console.log("Player Spawned:", player.name);
+function derivePlayerStats(base) {
+    return {
+        maxHP: base.club * 5 + base.spade * 2,
+        hp: base.club * 5 + base.spade * 2,
+        maxStamina: base.spade * 3 + base.club * 2,
+        stamina: base.spade * 3 + base.club * 2,
+        food: 100
     };
-    reader.readAsText(e.target.files[0]);
 }
 
+function importPlayerJSON(e) {
+    const reader = new FileReader();
+
+    reader.onload = (event) => {
+        try {
+            const data = JSON.parse(event.target.result);
+
+            if (!data.base_stats) {
+                alert("base_statsがありません");
+                return;
+            }
+
+            // 🔴 survivalの安全取得
+            let survival = {};
+            if (data.terrain_engine && data.terrain_engine.survival) {
+                survival = data.terrain_engine.survival;
+            }
+
+            player = {
+                id: "local-" + Date.now(),
+                name: data.name || "Unknown",
+                x: 32,
+                y: 32,
+                stats: data.base_stats,
+                color: "#00ff00",
+
+                originalData: data,
+
+                hp: calculateHP(data.base_stats),
+                maxHP: calculateHP(data.base_stats),
+
+                stamina: calculateStamina(data.base_stats),
+                maxStamina: calculateStamina(data.base_stats),
+                food: survival.food !== undefined ? survival.food : 100,
+
+                inventory: survival.inventory ? survival.inventory : {
+                    wood: 0,
+                    meat: 0
+                },
+
+                tamedWolves: survival.tamed_wolves ? survival.tamed_wolves : []
+            };
+
+            // 位置復元
+            if (survival.position) {
+                player.x = survival.position.x;
+                player.y = survival.position.y;
+            }
+
+            console.log("読み込み成功", player);
+
+        }catch (err) {
+            console.error("エラー詳細:", err);
+            alert(err.message);
+        }
+    };
+
+    reader.readAsText(e.target.files[0]);
+    if (!player.maxHP) player.maxHP = calculateHP(player.stats);
+    if (!player.maxStamina) player.maxStamina = calculateStamina(player.stats);
+}
 // window全体で入力を監視
 window.addEventListener('keydown', (e) => {
+    if (player.stamina <= 0) {
+        console.log("スタミナ切れ");
+        return;
+    }
     // プレイヤーがいない、または入力欄にフォーカスがある時は処理しない
     if (!player || ["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) {
         return;
@@ -470,6 +646,10 @@ window.addEventListener('keydown', (e) => {
     const key = e.key.toLowerCase();
     let nx = player.x;
     let ny = player.y;
+
+    // スタミナ消費
+    player.stamina -= 1;
+    if (player.stamina < 0) player.stamina = 0;
 
     // WASD移動
     if (key === 'w') { ny--; e.preventDefault(); }
@@ -480,12 +660,97 @@ window.addEventListener('keydown', (e) => {
     // 地形判定
     if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE) {
         if (heightMap[ny][nx] >= 0.0) {
-            player.x = nx;
-            player.y = ny;
+            onPlayerMove(nx, ny);
             broadcastPosition();
         }
     }
 }, { passive: false }); // preventDefaultを有効にするためのオプション
+
+function onPlayerMove(nx, ny) {
+    if (!player) return;
+
+    player.x = nx;
+    player.y = ny;
+
+    nextTurn();
+
+    const animal = animals.find(a => a.x === nx && a.y === ny);
+    if (animal) {
+        handleAnimalEvent(animal);
+        return;
+    }
+
+    const biome = getBiome(heightMap[ny][nx], humidityMap[ny][nx]).name;
+    handleGather(biome);
+
+    const village = villages.find(v => v.x === nx && v.y === ny);
+    if (village) handleTrade(village);
+}
+
+function handleAnimalEvent(animal) {
+
+    // --- 既に処理済み防止 ---
+    if (animal.processed) return;
+    animal.processed = true;
+
+    // --- 狼 ---
+    if (animal.type === "WOLF") {
+
+        if (animal.state === "tamed") return;
+
+        if (animal.state === "hostile") {
+            player.hp -= 2;
+            return;
+        }
+
+        if (player.tamedWolves.length >= 2) return;
+
+        const result = trumpCheck(player.stats.heart);
+
+        if (result === "fumble") {
+            animal.state = "hostile";
+        }
+        else if (result === "success" || result === "critical") {
+            animal.state = "tamed";
+            animal.tamed = true;
+            player.tamedWolves.push(animal);
+        }
+
+        return;
+    }
+
+    // --- 通常動物（狩り） ---
+    const result = trumpCheck(player.stats.spade);
+
+    if (result === "success") {
+        player.inventory.meat++;
+        animals = animals.filter(a => a.id !== animal.id);
+    }
+
+    if (result === "fumble") {
+        player.hp -= 2;
+    }
+}
+
+function handleGather(biome) {
+    const forestBiomes = ["森林", "幻影の森", "データ網"];
+
+    if (!forestBiomes.includes(biome)) return;
+
+    const result = trumpCheck(player.stats.club);
+
+    if (result === "success") player.inventory.wood++;
+    if (result === "critical") player.inventory.wood += 3;
+}
+
+function handleTrade(village) {
+    const result = trumpCheck(player.stats.diamond);
+
+    if (result === "success" && player.inventory.meat > 0) {
+        player.inventory.meat--;
+        player.inventory.wood += 2;
+    }
+}
 
 // --- PeerJS Listen Server システム ---
 let peer = null;
@@ -628,6 +893,71 @@ function exportWorld() { /* そのまま */ }
 generateMap();
 function ani() { draw(); requestAnimationFrame(ani); }
 ani();
+
+function exportWolf(index) {
+    const wolf = player.tamedWolves[index];
+
+    if (!wolf) return;
+
+    const data = {
+        name: "Tamed_" + wolf.type + "_" + wolf.id,
+        origin_system: "Terrain Engine",
+        base_stats: wolf.stats || {
+            spade: 3,
+            diamond: 2,
+            club: 4,
+            heart: 2
+        },
+        terrain_engine: {
+            type: "tamed_animal"
+        }
+    };
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${data.name}.json`;
+    a.click();
+}
+
+function exportPlayerJSON() {
+    if (!player) {
+        alert("プレイヤーが存在しません");
+        return;
+    }
+
+    // 元データをディープコピー
+    const base = JSON.parse(JSON.stringify(player.originalData || {}));
+
+    // --- 既存データを壊さず追記 ---
+    base.origin_system = base.origin_system || "Terrain Engine (Multiverse)";
+
+    // ステータス（Trump TRPG Systems互換）
+    base.base_stats = player.stats;
+
+    // --- サバイバル拡張データ ---
+    base.terrain_engine = base.terrain_engine || {};
+
+    base.terrain_engine.survival = {
+        hp: player.hp,
+        stamina: player.stamina,
+        food: player.food,
+        position: { x: player.x, y: player.y },
+        inventory: player.inventory,
+        tamed_wolves: player.tamedWolves.map(w => ({
+            id: w.id,
+            type: w.type,
+            stats: w.stats
+        }))
+    };
+
+    // JSON出力
+    const blob = new Blob([JSON.stringify(base, null, 2)], { type: "application/json" });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${player.name}_full.json`;
+    a.click();
+}
 </script>
 </body>
 </html>
