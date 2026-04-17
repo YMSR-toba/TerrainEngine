@@ -411,14 +411,14 @@ setInterval(() => {
         player.stamina += 1;
     }
     // HP回復（肉がある場合）
-    if (player.inventory.meat > 0 && player.inventory.food < 100 ) {
-        player.inventory.food += 2;
+    if (player.inventory.meat > 0 && player.food < 100 ) {
+        player.food += 2;
         player.inventory.meat -= 1;
 
-        if (player.inventory.food > 100) player.inventory.food = 100;
-    }else if (player.inventory.food > 0 && player.hp < player.maxHP){
+        if (player.food > 100) player.food = 100;
+    }else if (player.food > 0 && player.hp < player.maxHP){
         player.hp += 2;
-        player.inventory.food -= 1;
+        player.food -= 1;
 
         if (player.hp > player.maxHP) player.hp = player.maxHP;
     }
